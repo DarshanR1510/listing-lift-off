@@ -2,6 +2,8 @@
 
 A powerful scanner that identifies **IPO stocks** showing fresh momentum right after listing, based on **ATH breakout continuation strategy**. Designed to detect early trend opportunities in newly listed companies.
 
+##  [Live Demo](https://breakout-scout.streamlit.app/)
+
 ## 🎯 Strategy Logic
 
 This strategy focuses on **IPO listings within last 1 year** and captures breakout continuation moves after the stock breaks its **All-Time High (ATH)**.
@@ -43,12 +45,12 @@ This setup aims to catch **fresh post-IPO rallies** where a breakout leads to st
 
 ### Installation
 
-\`\`\`bash
+```bash
 git clone https://github.com/DarshanR1510/ipo-breakout-scout.git
 cd ipo-breakout-scout
 pip install -r requirements.txt
 streamlit run streamlit_app.py
-\`\`\`
+```
 
 ---
 
@@ -78,16 +80,25 @@ streamlit run streamlit_app.py
 
 ---
 
-## Configurable settings
+## 📄 License
 
-\`\`\`python
-IPO_LOOKBACK_DAYS = 365
-EMA_EXIT = 20
-\`\`\`
+This project is open source and available under the [MIT License](LICENSE).
+
+## ⚠️ Disclaimer
+
+This tool is for educational and informational purposes only. It is not financial advice. Always do your own research and consult with a financial advisor before making investment decisions.
+
+## 🙏 Acknowledgments
+
+- **ChartInk** - Stock screening data source
+- **Yahoo Finance** - Historical stock data via yfinance
+- **Streamlit** - Web app framework
+
+## 📧 Contact
+
+- GitHub: [@DarshanR1510](https://github.com/DarshanR1510)
+- Project Link: [https://github.com/DarshanR1510/listing-lift-off](https://github.com/DarshanR1510/listing-lift-off)
 
 ---
 
-## Disclaimer
-Educational purpose only. Not financial advice.
-
----
+Made with ❤️ by Darshan  |  Star ⭐ this repo if you find it helpful!
