@@ -2,7 +2,7 @@
 
 A powerful scanner that identifies **IPO stocks** showing fresh momentum right after listing, based on **ATH breakout continuation strategy**. Designed to detect early trend opportunities in newly listed companies.
 
-##  [Live Demo](https://breakout-scout.streamlit.app/)
+##  [Live Demo](https://listing-lift-off.streamlit.app/)
 
 ## 🎯 Strategy Logic
 
