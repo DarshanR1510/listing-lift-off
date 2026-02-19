@@ -1,0 +1,71 @@
+# .github/workflows/ipo_alert.yml
+#
+# Runs alert_runner.py at exactly 3:00 PM IST (09:30 UTC) every weekday.
+# IST = UTC + 5:30, so 3:00 PM IST = 09:30 UTC.
+# Only runs Mon–Fri (Indian market days).
+# Also allows manual trigger from GitHub Actions tab for testing.
+
+name: IPO Breakout Alert — 3PM IST
+
+on:
+  schedule:
+    # Cron: minute hour day month weekday (all UTC)
+    # 09:30 UTC = 15:00 IST, Mon–Fri
+    - cron: '30 9 * * 1-5'
+
+  # Allow manual run from GitHub → Actions tab → Run workflow
+  workflow_dispatch:
+
+jobs:
+  send-alert:
+    name: Run IPO Alert Scanner
+    runs-on: ubuntu-latest
+    timeout-minutes: 30       # kill job if it hangs
+
+    steps:
+      # ── 1. Checkout your repo ───────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Python ────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # ── 3. Install dependencies ─────────────────────────
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # ── 4. Install Playwright + Chromium ────────────────
+      - name: Install Playwright browsers
+        run: |
+          python -m playwright install chromium
+          python -m playwright install-deps chromium
+
+      # ── 5. Restore dedup log from cache ─────────────────
+      #    This lets the cooldown log persist across daily runs.
+      #    Without this, the dedup file resets every run.
+      - name: Restore alert dedup cache
+        uses: actions/cache@v4
+        with:
+          path: alerted_symbols.json
+          key: alerted-symbols-cache
+          restore-keys: |
+            alerted-symbols-cache
+
+      # ── 6. Run the alert script ─────────────────────────
+      - name: Run IPO Alert Runner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python alert_runner.py
+
+      # ── 7. Save updated dedup log back to cache ─────────
+      - name: Save alert dedup cache
+        if: always()           # save even if the script had errors
+        uses: actions/cache@v4
+        with:
+          path: alerted_symbols.json
+          key: alerted-symbols-cache

@@ -1,5 +1,17 @@
-streamlit
-playwright
-pandas
-yfinance
-numpy
+# requirements.txt
+# IPO Scanner — Darshan Ramani
+# Used by both streamlit_app.py (UI) and alert_runner.py (GitHub Actions)
+
+# ── Core data ──────────────────────────────────────────
+yfinance==0.2.55
+pandas==2.2.3
+numpy==1.26.4
+
+# ── Web scraping ────────────────────────────────────────
+playwright==1.49.0
+
+# ── HTTP (Telegram API calls in alert_runner.py) ────────
+requests==2.32.3
+
+# ── Streamlit UI ────────────────────────────────────────
+streamlit==1.41.1
