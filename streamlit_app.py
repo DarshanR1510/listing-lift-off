@@ -30,7 +30,7 @@ warnings.filterwarnings("ignore", message=r".*YF.download\(\) has changed argume
 # Page config
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="IPO Scanner · Darshan",
+    page_title="Listing Lift-Off · Darshan",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -568,7 +568,7 @@ with st.sidebar:
     <div style="font-family:'Share Tech Mono',monospace; font-size:0.65rem; letter-spacing:0.22em;
                 color:#00d4ff; text-transform:uppercase; margin-bottom:0.4rem;">⚡ System</div>
     <div style="font-family:'Rajdhani',sans-serif; font-size:1.9rem; font-weight:700;
-                color:#e8eeff; line-height:1.1; margin-bottom:0.4rem;">IPO Scanner</div>
+                color:#e8eeff; line-height:1.1; margin-bottom:0.4rem;">Listing Lift-Off</div>
     <div style="font-family:'Rajdhani',sans-serif; font-size:1.05rem; font-weight:600;
                 color:#9aaaca; letter-spacing:0.05em;">by Darshan Ramani</div>
     """, unsafe_allow_html=True)
@@ -614,7 +614,7 @@ with col_title:
     <div style="font-family:'Rajdhani',sans-serif; font-size:2.3rem; font-weight:700;
                 letter-spacing:0.05em; background:linear-gradient(90deg,#e8eeff 0%,#00d4ff 100%);
                 -webkit-background-clip:text; -webkit-text-fill-color:transparent; line-height:1.1;">
-        STOCK SCANNER
+        LISTING LIFT-OFF
     </div>
     """, unsafe_allow_html=True)
 
@@ -868,7 +868,7 @@ st.divider()
 st.markdown("""
 <div style="display:flex; justify-content:space-between; align-items:center;">
     <span style="font-family:'Share Tech Mono',monospace; font-size:0.72rem; color:#9aaaca; letter-spacing:0.1em;">
-        IPO SCANNER · DARSHAN RAMANI · DATA: CHARTINK + YAHOO FINANCE
+        LISTING LIFT-OFF · DARSHAN RAMANI · DATA: CHARTINK + YAHOO FINANCE
     </span>
     <span style="font-family:'Share Tech Mono',monospace; font-size:0.72rem; color:#9aaaca; letter-spacing:0.1em;">
         TAB 1: DAY 2 OPEN AFTER ATH BREAK · TAB 2: LISTING HIGH & ATH WATCH
