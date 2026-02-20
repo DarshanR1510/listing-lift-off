@@ -13,11 +13,18 @@ Smart filters applied (no spam):
   5. Dead setups filtered — ATH ran 30%+ then fell back to listing high
   6. Deduplication — already-alerted symbols skipped for 2 days
 
+Rate limit handling:
+  - No delay at all until Yahoo Finance pushes back
+  - First rate limit hit → 10s cooldown, retry that symbol, switch to throttled mode
+  - Throttled mode → 1.5s between every subsequent request for rest of run
+  - Self-calibrating: adapts exactly when Yahoo needs it, wastes no time before that
+
 No alerts qualify → complete silence. No spam.
 """
 
 import os
 import json
+import time
 import requests
 import yfinance as yf
 import pandas as pd
@@ -42,9 +49,62 @@ DEDUP_FILE             = "alerted_symbols.json"
 DEDUP_COOLDOWN_DAYS    = 2      # don't re-alert same symbol for 2 days
 
 # ─────────────────────────────────────────────
+# Rate limit handling — Adaptive Delay
+# ─────────────────────────────────────────────
+# No delay until Yahoo says no. The moment a rate limit
+# hits, we switch into throttled mode for the rest of the run.
+THROTTLE_DELAY_SEC  = 1.5   # per-request delay once throttled
+RATE_LIMIT_COOLDOWN = 10    # one-time pause when rate limit first hits
+
+
+def is_rate_limit_error(e: Exception) -> bool:
+    err = str(e)
+    return any(k in err for k in ("YFRateLimitError", "Too Many Requests", "Rate limited"))
+
+
+# Shared throttle state — flipped to True the moment Yahoo pushes back
+_throttled = False
+
+
+def download_with_retry(ticker: str) -> pd.DataFrame:
+    """
+    Downloads yfinance data. No delay in normal mode.
+    On first rate limit: pauses RATE_LIMIT_COOLDOWN seconds,
+    switches to throttled mode globally, then retries once.
+    On second rate limit in throttled mode: gives up for this symbol.
+    """
+    global _throttled
+
+    for attempt in range(2):   # max 2 attempts per symbol
+        try:
+            df = yf.download(ticker, period="2y", interval="1d",
+                             progress=False, auto_adjust=False)
+            return df
+
+        except Exception as e:
+            if is_rate_limit_error(e):
+                if attempt == 0:
+                    if not _throttled:
+                        # First time hitting rate limit in this run
+                        print(f"\n    ⚠️  Rate limit hit — switching to throttled mode ({THROTTLE_DELAY_SEC}s/request)")
+                        _throttled = True
+                    print(f"    cooling down {RATE_LIMIT_COOLDOWN}s before retry...")
+                    time.sleep(RATE_LIMIT_COOLDOWN)
+                    # Continue to attempt 1 (the retry)
+                else:
+                    print(f"    gave up after retry (still rate limited)")
+                    return pd.DataFrame()
+            else:
+                print(f"    download error: {e}")
+                return pd.DataFrame()
+
+    return pd.DataFrame()
+
+
+# ─────────────────────────────────────────────
 # Deduplication helpers
 # ─────────────────────────────────────────────
-def load_alerted_symbols():
+def load_alerted_symbols() -> dict:
     """Load previously alerted symbols with their alert dates."""
     if os.path.exists(DEDUP_FILE):
         try:
@@ -55,12 +115,12 @@ def load_alerted_symbols():
     return {}
 
 
-def save_alerted_symbols(data):
+def save_alerted_symbols(data: dict):
     with open(DEDUP_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
 
-def was_recently_alerted(symbol, alerted):
+def was_recently_alerted(symbol: str, alerted: dict) -> bool:
     """Return True if this symbol was alerted within the cooldown window."""
     if symbol not in alerted:
         return False
@@ -71,7 +131,7 @@ def was_recently_alerted(symbol, alerted):
 # ─────────────────────────────────────────────
 # ChartInk scraper — same as streamlit_app.py
 # ─────────────────────────────────────────────
-def scrape_ipo_symbols():
+def scrape_ipo_symbols() -> list:
     url = "https://chartink.com/screener/copy-ipo-base-scan-3950"
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -92,26 +152,28 @@ def scrape_ipo_symbols():
 # ─────────────────────────────────────────────
 # Core analysis — per symbol
 # ─────────────────────────────────────────────
-def analyse_symbol(symbol):
+def analyse_symbol(symbol: str) -> dict | None:
     """
     Returns an alert dict if the symbol qualifies, else None.
 
     Qualifies if ANY of these conditions hold (in priority order):
       A) Broke Listing High + approaching ATH (best setup)
       B) Just broke Listing High and holding (solid setup)
-      C) Within 2% of Listing High and today's candle is green (approaching)
-    
+      C) Within 2% of Listing High, green candle, volume up (approaching)
+
     All conditions also require:
       - Volume above 20-day average
-      - Holding above breakout level by 0.5%+ at close
+      - Price holding 0.5%+ above breakout level
       - Breakout is fresh (within last 3 trading days)
       - Not a dead setup (ATH ran 30%+ then price fell back)
     """
+    ticker = f"{symbol}.NS"
+    df = download_with_retry(ticker)
+
+    if df.empty or len(df) < 20:
+        return None
+
     try:
-        ticker = f"{symbol}.NS"
-        df = yf.download(ticker, period="2y", interval="1d", progress=False, auto_adjust=False)
-        if df.empty or len(df) < 20:
-            return None
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
@@ -125,13 +187,13 @@ def analyse_symbol(symbol):
         today_volume       = float(df['Volume'].iloc[-1])
         days_since_listing = len(df)
 
-        # Volume filter
+        # Volume check
         avg_volume_20 = df['Volume'].rolling(20).mean().iloc[-1]
         if np.isnan(avg_volume_20) or avg_volume_20 == 0:
             return None
         volume_ratio = today_volume / avg_volume_20
 
-        # Dead setup filter
+        # Dead setup filter — ATH ran 30%+ and price fell back near listing high
         ath_run_pct          = ((ath - listing_day_high) / listing_day_high) * 100
         price_back_near_base = current_price <= listing_day_high * 1.05
         if ath_run_pct >= ATH_RUN_FILTER_PCT and price_back_near_base:
@@ -144,70 +206,62 @@ def analyse_symbol(symbol):
         broke_listing_high = current_price > listing_day_high
         near_ath           = pct_from_ath >= -PROXIMITY_PCT
 
-        # ── Find when the breakout actually happened ──────────────────────
-        # Look back over the last FRESH_BREAKOUT_DAYS candles to see
-        # if a new crossing of listing_day_high occurred recently.
-        lookback = df.tail(FRESH_BREAKOUT_DAYS + 1)
+        # ── Freshness check ───────────────────────────────────────────────
+        # Look for a recent crossing of listing_day_high
+        lookback          = df.tail(FRESH_BREAKOUT_DAYS + 1)
         breakout_is_fresh = False
         breakout_date     = None
 
         if broke_listing_high:
-            # Walk backwards to find when price first crossed listing_day_high
             prices = lookback['Close'].values
             for i in range(len(prices) - 1, 0, -1):
                 if prices[i] > listing_day_high and prices[i - 1] <= listing_day_high:
                     breakout_is_fresh = True
                     breakout_date = lookback.index[i].strftime('%Y-%m-%d')
                     break
-            # Also accept: already above for all of lookback window
-            # but only if today's candle is strong (price > open and volume good)
+            # Already above for the entire lookback window but strong close today
             if not breakout_is_fresh:
                 if all(p > listing_day_high for p in prices) and current_price > today_open:
                     breakout_is_fresh = True
                     breakout_date = lookback.index[0].strftime('%Y-%m-%d')
 
-        # ── Apply all quality filters ─────────────────────────────────────
-
-        # Must have broken listing high
+        # ── Case: approaching but not yet broken ─────────────────────────
         if not broke_listing_high:
-            # "Approaching" alert: within 2% AND volume is 1.2x+ AND green candle today
             approaching = pct_from_listing_high >= -PROXIMITY_PCT
             green_today = current_price > today_open
             volume_ok   = volume_ratio >= 1.2
             if approaching and green_today and volume_ok:
                 return {
-                    'symbol':              symbol,
-                    'alert_type':          'APPROACHING',
-                    'listing_date':        listing_date,
-                    'days_since_listing':  days_since_listing,
-                    'listing_day_high':    round(listing_day_high, 2),
-                    'ath':                 round(ath, 2),
-                    'current_price':       round(current_price, 2),
+                    'symbol':                symbol,
+                    'alert_type':            'APPROACHING',
+                    'listing_date':          listing_date,
+                    'days_since_listing':    days_since_listing,
+                    'listing_day_high':      round(listing_day_high, 2),
+                    'ath':                   round(ath, 2),
+                    'current_price':         round(current_price, 2),
                     'pct_from_listing_high': round(pct_from_listing_high, 2),
-                    'pct_from_ath':        round(pct_from_ath, 2),
-                    'volume_ratio':        round(volume_ratio, 2),
-                    'breakout_date':       None,
-                    'near_ath':            near_ath,
-                    'priority':            3,  # lowest priority
+                    'pct_from_ath':          round(pct_from_ath, 2),
+                    'volume_ratio':          round(volume_ratio, 2),
+                    'breakout_date':         None,
+                    'near_ath':              near_ath,
+                    'priority':              3,
                 }
             return None
 
-        # Broke listing high — apply strength filter
+        # ── Broke listing high — apply quality filters ────────────────────
         if pct_from_listing_high < MIN_BREAKOUT_STRENGTH:
-            return None  # Too close to level, not convincing
+            return None   # barely above, not convincing
 
-        # Volume must be above average
         if volume_ratio < 1.0:
-            return None  # Breakout on weak volume — skip
+            return None   # breakout on weak volume
 
-        # Must be a fresh breakout
         if not breakout_is_fresh:
-            return None  # Stock broke out long ago, already a known position
+            return None   # old breakout, not a new signal
 
-        # ── Determine alert type and priority ─────────────────────────────
+        # ── Classify and return ───────────────────────────────────────────
         if near_ath:
             alert_type = 'BROKE_LISTING_HIGH_NEAR_ATH'
-            priority   = 1  # highest — both levels in play
+            priority   = 1
         else:
             alert_type = 'BROKE_LISTING_HIGH'
             priority   = 2
@@ -229,14 +283,14 @@ def analyse_symbol(symbol):
         }
 
     except Exception as e:
-        print(f"  ✗ {symbol}: {e}")
+        print(f"    parse error: {e}")
         return None
 
 
 # ─────────────────────────────────────────────
 # Telegram messenger
 # ─────────────────────────────────────────────
-def send_telegram(message: str):
+def send_telegram(message: str) -> bool:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("⚠️  Telegram credentials not set. Message not sent.")
         print("─" * 50)
@@ -264,16 +318,13 @@ def send_telegram(message: str):
 # ─────────────────────────────────────────────
 # Message builder
 # ─────────────────────────────────────────────
-def build_message(alerts, run_time):
+def build_message(alerts: list, run_time: str) -> str:
     lines = []
     lines.append("⚡ <b>IPO BREAKOUT ALERT — 3:00 PM IST</b>")
     lines.append(f"🗓 {run_time}")
     lines.append("─" * 32)
 
-    # Sort by priority (1 = best first)
-    alerts_sorted = sorted(alerts, key=lambda x: x['priority'])
-
-    for a in alerts_sorted:
+    for a in sorted(alerts, key=lambda x: x['priority']):
         sym   = a['symbol']
         price = a['current_price']
         lhigh = a['listing_day_high']
@@ -310,8 +361,8 @@ def build_message(alerts, run_time):
             lines.append(f"   Volume     : {vol:.1f}× avg ✅  |  Green candle today")
             lines.append(f"   <b>→ Watch for breakout above ₹{lhigh}</b>")
 
-    lines.append(f"\n─" * 32)
-    count = len(alerts_sorted)
+    lines.append(f"\n{'─' * 32}")
+    count = len(alerts)
     lines.append(f"<i>{count} alert{'s' if count > 1 else ''} · IPO Scanner by Darshan</i>")
     return "\n".join(lines)
 
@@ -325,7 +376,7 @@ def main():
     print(f"IPO Alert Runner — {run_time}")
     print(f"{'='*50}")
 
-    # Step 1 — Fetch symbols
+    # ── Step 1: Fetch symbols ──────────────────────────
     print("\n[1/4] Fetching IPO symbols from ChartInk...")
     try:
         symbols = scrape_ipo_symbols()
@@ -335,35 +386,44 @@ def main():
         send_telegram(f"⚠️ IPO Alert Runner failed to fetch symbols.\nError: {e}")
         return
 
-    # Step 2 — Load dedup log
+    # ── Step 2: Load dedup log ─────────────────────────
     print("\n[2/4] Loading deduplication log...")
     alerted = load_alerted_symbols()
     print(f"  ✓ {len(alerted)} symbols in cooldown log")
 
-    # Step 3 — Scan each symbol
-    print(f"\n[3/4] Scanning {len(symbols)} symbols...")
+    # ── Step 3: Scan each symbol ───────────────────────
+    print(f"\n[3/4] Scanning {len(symbols)} symbols (delay: {REQUEST_DELAY_SEC}s per request)...")
     alerts      = []
     skipped_dup = []
+    failed      = []
 
     for i, symbol in enumerate(symbols, 1):
-        print(f"  [{i}/{len(symbols)}] {symbol}...", end=" ")
+        print(f"  [{i}/{len(symbols)}] {symbol}...", end=" ", flush=True)
 
         # Skip if recently alerted
         if was_recently_alerted(symbol, alerted):
             print("skipped (cooldown)")
             skipped_dup.append(symbol)
+            # Apply throttle delay here too so we don't burst after a skip
+            if _throttled:
+                time.sleep(THROTTLE_DELAY_SEC)
             continue
 
         result = analyse_symbol(symbol)
+
         if result:
             alerts.append(result)
             print(f"✅ ALERT — {result['alert_type']}")
         else:
             print("–")
 
-    print(f"\n  → {len(alerts)} alerts found, {len(skipped_dup)} skipped (cooldown)")
+        # Only delay if we've been rate limited — otherwise run free
+        if _throttled:
+            time.sleep(THROTTLE_DELAY_SEC)
 
-    # Step 4 — Send or stay silent
+    print(f"\n  → {len(alerts)} alerts | {len(skipped_dup)} on cooldown | {len(failed)} failed")
+
+    # ── Step 4: Send or stay silent ───────────────────
     print("\n[4/4] Sending notifications...")
     if not alerts:
         print("  → No qualifying alerts. Staying silent. ✓")
@@ -372,12 +432,11 @@ def main():
         success = send_telegram(message)
 
         if success:
-            # Update dedup log — mark alerted symbols with today's date
+            # Update dedup log
             today = datetime.now().strftime("%Y-%m-%d")
             for a in alerts:
                 alerted[a['symbol']] = today
-
-            # Clean up old entries (older than cooldown window)
+            # Clean up entries older than cooldown window
             cutoff = (datetime.now() - timedelta(days=DEDUP_COOLDOWN_DAYS + 1)).strftime("%Y-%m-%d")
             alerted = {k: v for k, v in alerted.items() if v >= cutoff}
             save_alerted_symbols(alerted)
