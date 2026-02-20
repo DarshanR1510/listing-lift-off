@@ -392,7 +392,7 @@ def main():
     print(f"  ✓ {len(alerted)} symbols in cooldown log")
 
     # ── Step 3: Scan each symbol ───────────────────────
-    print(f"\n[3/4] Scanning {len(symbols)} symbols (delay: {REQUEST_DELAY_SEC}s per request)...")
+    print(f"\n[3/4] Scanning {len(symbols)} symbols (delay: 1.5s per request)...")
     alerts      = []
     skipped_dup = []
     failed      = []
