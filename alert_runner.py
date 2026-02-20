@@ -9,15 +9,16 @@ Smart filters applied (no spam):
   1. Stock must be holding above breakout level at 3pm (not just touched it)
   2. Price must be at least 0.5% above the breakout level (not just barely)
   3. Today's volume must be above 20-day average (confirmed breakout)
-  4. Breakout must be fresh — happened within last 3 trading days
+  4. Breakout must be fresh — actual crossing point within last 3 trading days
   5. Dead setups filtered — ATH ran 30%+ then fell back to listing high
-  6. Deduplication — already-alerted symbols skipped for 2 days
+  6. Pullback recovery filtered — stock previously ran 15%+ above listing high,
+     fell back below it, now crossing again. Different risk profile. Excluded.
+  7. Deduplication — already-alerted symbols skipped for 2 days
 
 Rate limit handling:
-  - No delay at all until Yahoo Finance pushes back
-  - First rate limit hit → 10s cooldown, retry that symbol, switch to throttled mode
-  - Throttled mode → 1.5s between every subsequent request for rest of run
-  - Self-calibrating: adapts exactly when Yahoo needs it, wastes no time before that
+  - Uses Ticker().history() with browser User-Agent — avoids Yahoo IP blocks
+  - Adaptive delay: no sleep until Yahoo pushes back, then 1.5s per request
+  - First rate limit → 10s cooldown + retry, then throttled mode for rest of run
 
 No alerts qualify → complete silence. No spam.
 """
@@ -29,7 +30,8 @@ import requests
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from requests import Session
 from playwright.sync_api import sync_playwright
 
 # ─────────────────────────────────────────────
@@ -49,48 +51,76 @@ DEDUP_FILE             = "alerted_symbols.json"
 DEDUP_COOLDOWN_DAYS    = 2      # don't re-alert same symbol for 2 days
 
 # ─────────────────────────────────────────────
+# IST timezone — FIX: datetime.now() returns UTC on GitHub runners
+# ─────────────────────────────────────────────
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def now_ist() -> datetime:
+    """Current time in IST regardless of server timezone (GitHub runs UTC)."""
+    return datetime.now(timezone.utc).astimezone(IST)
+
+# ─────────────────────────────────────────────
 # Rate limit handling — Adaptive Delay
 # ─────────────────────────────────────────────
-# No delay until Yahoo says no. The moment a rate limit
-# hits, we switch into throttled mode for the rest of the run.
 THROTTLE_DELAY_SEC  = 1.5   # per-request delay once throttled
 RATE_LIMIT_COOLDOWN = 10    # one-time pause when rate limit first hits
 
+# FIX: Browser User-Agent — Yahoo aggressively blocks the default
+# python-requests User-Agent on shared IPs like GitHub Actions.
+# Mimicking a real Chrome browser gets through reliably.
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+}
 
-def is_rate_limit_error(e: Exception) -> bool:
-    err = str(e)
-    return any(k in err for k in ("YFRateLimitError", "Too Many Requests", "Rate limited"))
-
+# Single shared session with browser headers — reused across all requests
+_session = Session()
+_session.headers.update(_HEADERS)
 
 # Shared throttle state — flipped to True the moment Yahoo pushes back
 _throttled = False
 
 
+def is_rate_limit_error(e: Exception) -> bool:
+    err = str(e)
+    return any(k in err for k in ("YFRateLimitError", "Too Many Requests", "Rate limited", "429"))
+
+
 def download_with_retry(ticker: str) -> pd.DataFrame:
     """
-    Downloads yfinance data. No delay in normal mode.
-    On first rate limit: pauses RATE_LIMIT_COOLDOWN seconds,
-    switches to throttled mode globally, then retries once.
-    On second rate limit in throttled mode: gives up for this symbol.
+    Downloads 2y daily data using Ticker().history() with a browser User-Agent.
+    On rate limit: pauses RATE_LIMIT_COOLDOWN seconds, switches to throttled
+    mode globally, retries once. Gives up after 2 attempts.
     """
     global _throttled
 
-    for attempt in range(2):   # max 2 attempts per symbol
+    for attempt in range(2):
         try:
-            df = yf.download(ticker, period="2y", interval="1d",
-                             progress=False, auto_adjust=False)
+            t  = yf.Ticker(ticker, session=_session)
+            df = t.history(period="2y", interval="1d", auto_adjust=False)
+
+            if df.empty:
+                return pd.DataFrame()
+
+            # history() returns tz-aware index — strip for consistency
+            if df.index.tz is not None:
+                df.index = df.index.tz_convert(None)
+
             return df
 
         except Exception as e:
             if is_rate_limit_error(e):
                 if attempt == 0:
                     if not _throttled:
-                        # First time hitting rate limit in this run
                         print(f"\n    ⚠️  Rate limit hit — switching to throttled mode ({THROTTLE_DELAY_SEC}s/request)")
                         _throttled = True
                     print(f"    cooling down {RATE_LIMIT_COOLDOWN}s before retry...")
                     time.sleep(RATE_LIMIT_COOLDOWN)
-                    # Continue to attempt 1 (the retry)
                 else:
                     print(f"    gave up after retry (still rate limited)")
                     return pd.DataFrame()
@@ -129,7 +159,7 @@ def was_recently_alerted(symbol: str, alerted: dict) -> bool:
 
 
 # ─────────────────────────────────────────────
-# ChartInk scraper — same as streamlit_app.py
+# ChartInk scraper
 # ─────────────────────────────────────────────
 def scrape_ipo_symbols() -> list:
     url = "https://chartink.com/screener/copy-ipo-base-scan-3950"
@@ -164,11 +194,14 @@ def analyse_symbol(symbol: str) -> dict | None:
     All conditions also require:
       - Volume above 20-day average
       - Price holding 0.5%+ above breakout level
-      - Breakout is fresh (within last 3 trading days)
-      - Not a dead setup (ATH ran 30%+ then price fell back)
+      - Breakout is fresh — must find ACTUAL crossing point within last 3 days
+        (price below on day N-1, above on day N). No fallback.
+      - Not a dead setup (ATH ran 30%+ then price fell back to base)
+      - Not a pullback recovery (previously ran 15%+ above listing high,
+        fell back below it, now crossing again)
     """
     ticker = f"{symbol}.NS"
-    df = download_with_retry(ticker)
+    df     = download_with_retry(ticker)
 
     if df.empty or len(df) < 20:
         return None
@@ -193,7 +226,8 @@ def analyse_symbol(symbol: str) -> dict | None:
             return None
         volume_ratio = today_volume / avg_volume_20
 
-        # Dead setup filter — ATH ran 30%+ and price fell back near listing high
+        # ── Dead setup filter ─────────────────────────────────────────────
+        # ATH ran 30%+ above listing high AND price is back near listing high
         ath_run_pct          = ((ath - listing_day_high) / listing_day_high) * 100
         price_back_near_base = current_price <= listing_day_high * 1.05
         if ath_run_pct >= ATH_RUN_FILTER_PCT and price_back_near_base:
@@ -207,23 +241,34 @@ def analyse_symbol(symbol: str) -> dict | None:
         near_ath           = pct_from_ath >= -PROXIMITY_PCT
 
         # ── Freshness check ───────────────────────────────────────────────
-        # Look for a recent crossing of listing_day_high
+        # Require an ACTUAL crossing point within the last FRESH_BREAKOUT_DAYS.
+        # Price must have been BELOW listing_day_high on day N-1 and ABOVE on day N.
+        # No fallback — if we can't find the exact cross, it's not fresh.
         lookback          = df.tail(FRESH_BREAKOUT_DAYS + 1)
         breakout_is_fresh = False
         breakout_date     = None
 
         if broke_listing_high:
-            prices = lookback['Close'].values
-            for i in range(len(prices) - 1, 0, -1):
-                if prices[i] > listing_day_high and prices[i - 1] <= listing_day_high:
+            closes = lookback['Close'].values
+            for i in range(len(closes) - 1, 0, -1):
+                if closes[i] > listing_day_high and closes[i - 1] <= listing_day_high:
                     breakout_is_fresh = True
                     breakout_date = lookback.index[i].strftime('%Y-%m-%d')
                     break
-            # Already above for the entire lookback window but strong close today
-            if not breakout_is_fresh:
-                if all(p > listing_day_high for p in prices) and current_price > today_open:
-                    breakout_is_fresh = True
-                    breakout_date = lookback.index[0].strftime('%Y-%m-%d')
+
+        # ── Pullback recovery filter ──────────────────────────────────────
+        # If price previously ran 15%+ above listing high AND then dipped back
+        # below it — this crossing is a second attempt, not a fresh breakout.
+        # Catches stocks like ADVAIT (ran +22%, pulled back, now re-crossing).
+        if breakout_is_fresh and broke_listing_high:
+            prior_history = df.iloc[:(-(FRESH_BREAKOUT_DAYS + 1))]['Close']
+            if len(prior_history) > 0:
+                peak_before = float(prior_history.max())
+                pct_peak    = ((peak_before - listing_day_high) / listing_day_high) * 100
+                if pct_peak >= 15.0:
+                    ever_below = any(float(p) <= listing_day_high for p in prior_history.values)
+                    if ever_below:
+                        return None  # pullback recovery — exclude
 
         # ── Case: approaching but not yet broken ─────────────────────────
         if not broke_listing_high:
@@ -248,7 +293,7 @@ def analyse_symbol(symbol: str) -> dict | None:
                 }
             return None
 
-        # ── Broke listing high — apply quality filters ────────────────────
+        # ── Broke listing high — quality filters ──────────────────────────
         if pct_from_listing_high < MIN_BREAKOUT_STRENGTH:
             return None   # barely above, not convincing
 
@@ -371,7 +416,9 @@ def build_message(alerts: list, run_time: str) -> str:
 # Main
 # ─────────────────────────────────────────────
 def main():
-    run_time = datetime.now().strftime("%Y-%m-%d %H:%M IST")
+    # FIX: Use IST explicitly — GitHub Actions runners are UTC
+    run_time = now_ist().strftime("%Y-%m-%d %H:%M IST")
+
     print(f"\n{'='*50}")
     print(f"IPO Alert Runner — {run_time}")
     print(f"{'='*50}")
@@ -392,19 +439,16 @@ def main():
     print(f"  ✓ {len(alerted)} symbols in cooldown log")
 
     # ── Step 3: Scan each symbol ───────────────────────
-    print(f"\n[3/4] Scanning {len(symbols)} symbols (delay: 1.5s per request)...")
+    print(f"\n[3/4] Scanning {len(symbols)} symbols...")
     alerts      = []
     skipped_dup = []
-    failed      = []
 
     for i, symbol in enumerate(symbols, 1):
         print(f"  [{i}/{len(symbols)}] {symbol}...", end=" ", flush=True)
 
-        # Skip if recently alerted
         if was_recently_alerted(symbol, alerted):
             print("skipped (cooldown)")
             skipped_dup.append(symbol)
-            # Apply throttle delay here too so we don't burst after a skip
             if _throttled:
                 time.sleep(THROTTLE_DELAY_SEC)
             continue
@@ -417,11 +461,11 @@ def main():
         else:
             print("–")
 
-        # Only delay if we've been rate limited — otherwise run free
+        # Only delay if Yahoo has pushed back — otherwise run free
         if _throttled:
             time.sleep(THROTTLE_DELAY_SEC)
 
-    print(f"\n  → {len(alerts)} alerts | {len(skipped_dup)} on cooldown | {len(failed)} failed")
+    print(f"\n  → {len(alerts)} alerts | {len(skipped_dup)} on cooldown")
 
     # ── Step 4: Send or stay silent ───────────────────
     print("\n[4/4] Sending notifications...")
@@ -432,12 +476,10 @@ def main():
         success = send_telegram(message)
 
         if success:
-            # Update dedup log
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = now_ist().strftime("%Y-%m-%d")
             for a in alerts:
                 alerted[a['symbol']] = today
-            # Clean up entries older than cooldown window
-            cutoff = (datetime.now() - timedelta(days=DEDUP_COOLDOWN_DAYS + 1)).strftime("%Y-%m-%d")
+            cutoff = (now_ist() - timedelta(days=DEDUP_COOLDOWN_DAYS + 1)).strftime("%Y-%m-%d")
             alerted = {k: v for k, v in alerted.items() if v >= cutoff}
             save_alerted_symbols(alerted)
             print(f"  ✓ Dedup log updated with {len(alerts)} new entries")
