@@ -10,7 +10,7 @@ name: IPO Breakout Alert — 3PM IST
 on:
   schedule:
     # 09:30 UTC = 15:00 IST, Mon–Fri
-    - cron: '30 9 * * 1-5'
+    - cron: '0 9 * * 1-5'
 
   # Manual trigger — use this to test anytime
   workflow_dispatch:
